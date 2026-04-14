@@ -138,6 +138,17 @@ class CheckChannelMemberReq(BaseModel):
     channel_username: str
     user_username: str
 
+# ==================== НОВЫЕ МОДЕЛИ ДЛЯ ПОЛУЧЕНИЯ СООБЩЕНИЙ ====================
+class GetLastMessageReq(BaseModel):
+    account: str
+    chat_id: Union[str, int]
+
+class GetLastMessagesReq(BaseModel):
+    account: str
+    chat_id: Union[str, int]
+    limit: int = 10
+    include_media_info: bool = False
+
 # ==================== Вспомогательные функции ====================
 def extract_folder_title(folder_obj):
     if not hasattr(folder_obj, 'title'):
@@ -150,6 +161,49 @@ def extract_folder_title(folder_obj):
         return title_obj
     return None
 
+def get_chat_title(chat):
+    """Получить название чата"""
+    if hasattr(chat, 'title'):
+        return chat.title
+    elif hasattr(chat, 'first_name'):
+        title = chat.first_name
+        if hasattr(chat, 'last_name') and chat.last_name:
+            title += f" {chat.last_name}"
+        return title
+    return "Unknown"
+
+async def get_sender_info_from_message(client, message):
+    """Вспомогательная функция для получения информации об отправителе сообщения"""
+    try:
+        sender_id = None
+        
+        # Определяем ID отправителя
+        if hasattr(message, 'from_id') and message.from_id:
+            from_id = message.from_id
+            if hasattr(from_id, 'user_id'):
+                sender_id = from_id.user_id
+            elif hasattr(from_id, 'channel_id'):
+                sender_id = from_id.channel_id
+        elif hasattr(message, 'sender_id'):
+            sender_id = message.sender_id
+        
+        if sender_id:
+            try:
+                sender = await client.get_entity(sender_id)
+                return {
+                    "id": sender.id,
+                    "name": (getattr(sender, 'first_name', '') + (' ' + getattr(sender, 'last_name', '') if getattr(sender, 'last_name', '') else '')).strip(),
+                    "first_name": getattr(sender, 'first_name', ''),
+                    "last_name": getattr(sender, 'last_name', ''),
+                    "username": getattr(sender, 'username', None),
+                    "phone": getattr(sender, 'phone', None),
+                    "is_bot": getattr(sender, 'bot', False)
+                }
+            except:
+                return {"id": sender_id, "name": f"User {sender_id}"}
+    except:
+        pass
+    return None
 
 async def get_dialogs_with_folders_info(client: TelegramClient, limit: int = 50) -> List[DialogInfo]:
     """Получить диалоги с информацией о папках"""
@@ -259,7 +313,8 @@ async def root():
             "/accounts/add", "/accounts/{name}", "/accounts",
             "/send", "/dialogs", "/chat_history", "/export_members",
             "/send_to_new_user", "/add_contact", "/send_contact",
-            "/get_sender_info", "/channel/add_user", "/channel/check_member"
+            "/get_sender_info", "/channel/add_user", "/channel/check_member",
+            "/get_last_message", "/get_last_messages"
         ]
     }
 
@@ -430,7 +485,7 @@ def list_accounts():
     return {"active_accounts": list(ACTIVE_CLIENTS.keys())}
 
 
-# ==================== Остальные эндпоинты ====================
+# ==================== Отправка сообщений ====================
 @app.post("/send")
 async def send_message(req: SendMessageReq):
     client = ACTIVE_CLIENTS.get(req.account)
@@ -444,6 +499,7 @@ async def send_message(req: SendMessageReq):
         raise HTTPException(500, detail=f"Ошибка отправки: {str(e)}")
 
 
+# ==================== Экспорт участников ====================
 @app.post("/export_members")
 async def export_members(req: ExportMembersReq):
     client = ACTIVE_CLIENTS.get(req.account)
@@ -512,6 +568,7 @@ async def export_members(req: ExportMembersReq):
         raise HTTPException(500, detail=f"Ошибка экспорта: {str(e)}")
 
 
+# ==================== Диалоги ====================
 @app.post("/dialogs")
 async def get_dialogs(req: GetDialogsReq):
     client = ACTIVE_CLIENTS.get(req.account)
@@ -547,6 +604,42 @@ async def get_dialogs(req: GetDialogsReq):
         raise HTTPException(500, detail=f"Ошибка получения диалогов: {str(e)}")
 
 
+@app.post("/folders/{account}")
+async def get_all_folders(account: str):
+    client = ACTIVE_CLIENTS.get(account)
+    if not client:
+        raise HTTPException(400, detail=f"Аккаунт не найден: {account}")
+
+    try:
+        dialog_filters_result = await client(GetDialogFiltersRequest())
+        dialog_filters = getattr(dialog_filters_result, 'filters', [])
+        folders = []
+        
+        for folder in dialog_filters:
+            folder_title = extract_folder_title(folder)
+            
+            if hasattr(folder, 'id') and folder_title:
+                folder_info = {
+                    "id": folder.id,
+                    "title": folder_title,
+                    "color": getattr(folder, 'color', None),
+                    "pinned": getattr(folder, 'pinned', False),
+                    "include_count": len(getattr(folder, 'include_peers', [])),
+                    "exclude_count": len(getattr(folder, 'exclude_peers', []))
+                }
+                folders.append(folder_info)
+        
+        return {
+            "status": "success",
+            "account": account,
+            "total_folders": len(folders),
+            "folders": folders
+        }
+    except Exception as e:
+        raise HTTPException(500, detail=f"Ошибка получения папок: {str(e)}")
+
+
+# ==================== История чата ====================
 @app.post("/chat_history")
 async def get_chat_history(req: GetChatHistoryReq):
     client = ACTIVE_CLIENTS.get(req.account)
@@ -622,6 +715,259 @@ async def get_chat_history(req: GetChatHistoryReq):
         raise
     except Exception as e:
         raise HTTPException(500, detail=f"Ошибка получения истории: {str(e)}")
+
+
+# ==================== НОВЫЙ ЭНДПОИНТ: Получить последнее сообщение ====================
+@app.post("/get_last_message")
+async def get_last_message(req: GetLastMessageReq):
+    """
+    Получить последнее сообщение в указанном чате.
+    
+    Параметры:
+    - account: имя аккаунта
+    - chat_id: ID чата, username или @username
+    
+    Возвращает:
+    - Информацию о последнем сообщении: текст, отправитель, дата, ID и т.д.
+    """
+    client = ACTIVE_CLIENTS.get(req.account)
+    if not client:
+        raise HTTPException(400, detail=f"Аккаунт не найден: {req.account}")
+
+    try:
+        # 1. Получаем сущность чата
+        chat_id = req.chat_id
+        
+        if isinstance(chat_id, str):
+            if chat_id.startswith('@'):
+                chat_id = chat_id[1:]
+            if chat_id.lstrip('-').isdigit():
+                chat_id = int(chat_id)
+        
+        try:
+            chat = await client.get_entity(chat_id)
+        except Exception:
+            dialogs = await client.get_dialogs()
+            for dialog in dialogs:
+                if str(dialog.id) == str(chat_id) or (hasattr(dialog.entity, 'username') and dialog.entity.username == chat_id):
+                    chat = dialog.entity
+                    break
+            else:
+                raise HTTPException(400, detail=f"Не удалось найти чат: {req.chat_id}")
+        
+        # 2. Получаем последнее сообщение
+        messages = await client.get_messages(chat, limit=1)
+        
+        if not messages or len(messages) == 0:
+            return {
+                "status": "success",
+                "account": req.account,
+                "chat_id": req.chat_id,
+                "chat_title": get_chat_title(chat),
+                "has_messages": False,
+                "message": None,
+                "note": "В этом чате нет сообщений"
+            }
+        
+        message = messages[0]
+        
+        # 3. Получаем информацию об отправителе
+        sender_info = await get_sender_info_from_message(client, message)
+        
+        # 4. Определяем тип сообщения
+        message_type = "text"
+        media_info = None
+        
+        if message.media:
+            if hasattr(message.media, 'document'):
+                message_type = "document"
+                media_info = {
+                    "name": "Unknown",
+                    "size": getattr(message.media.document, 'size', 0),
+                    "mime_type": getattr(message.media.document, 'mime_type', '')
+                }
+                if hasattr(message.media.document, 'attributes'):
+                    for attr in message.media.document.attributes:
+                        if hasattr(attr, 'file_name'):
+                            media_info["name"] = attr.file_name
+                            break
+            elif hasattr(message.media, 'photo'):
+                message_type = "photo"
+            elif hasattr(message.media, 'video'):
+                message_type = "video"
+            elif hasattr(message.media, 'audio'):
+                message_type = "audio"
+            elif hasattr(message.media, 'voice'):
+                message_type = "voice"
+            elif hasattr(message.media, 'contact'):
+                message_type = "contact"
+                media_info = {
+                    "first_name": message.media.first_name,
+                    "last_name": message.media.last_name,
+                    "phone_number": message.media.phone_number
+                }
+            elif hasattr(message.media, 'geo'):
+                message_type = "location"
+            else:
+                message_type = "media"
+        
+        # 5. Формируем ответ
+        response = {
+            "status": "success",
+            "account": req.account,
+            "chat_id": req.chat_id,
+            "chat_title": get_chat_title(chat),
+            "has_messages": True,
+            "last_message": {
+                "id": message.id,
+                "date": message.date.isoformat() if message.date else None,
+                "text": message.text or message.message or "",
+                "is_outgoing": message.out if hasattr(message, 'out') else False,
+                "message_type": message_type,
+                "has_media": bool(message.media),
+                "has_reply": bool(message.reply_to) if hasattr(message, 'reply_to') else False,
+                "is_forward": bool(message.forward) if hasattr(message, 'forward') else False,
+                "views": message.views if hasattr(message, 'views') else None,
+                "forwards": message.forwards if hasattr(message, 'forwards') else None,
+                "sender": sender_info,
+                "media_info": media_info
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        return response
+        
+    except PeerIdInvalidError:
+        raise HTTPException(400, detail="Неверный ID чата или пользователя")
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Ошибка получения последнего сообщения: {error_msg}")
+        
+        if "CHANNEL_PRIVATE" in error_msg:
+            raise HTTPException(403, detail="Нет доступа к указанному каналу")
+        elif "CHAT_FORBIDDEN" in error_msg:
+            raise HTTPException(403, detail="Нет доступа к указанному чату")
+        else:
+            raise HTTPException(500, detail=f"Ошибка получения последнего сообщения: {error_msg}")
+
+
+# ==================== НОВЫЙ ЭНДПОИНТ: Получить последние N сообщений ====================
+@app.post("/get_last_messages")
+async def get_last_messages(req: GetLastMessagesReq):
+    """
+    Получить последние N сообщений в чате.
+    
+    Параметры:
+    - account: имя аккаунта
+    - chat_id: ID чата, username или @username
+    - limit: количество сообщений (1-100, по умолчанию 10)
+    - include_media_info: включать ли детальную информацию о медиа (по умолчанию False)
+    """
+    client = ACTIVE_CLIENTS.get(req.account)
+    if not client:
+        raise HTTPException(400, detail=f"Аккаунт не найден: {req.account}")
+
+    limit = min(max(req.limit, 1), 100)
+    
+    try:
+        chat_id = req.chat_id
+        
+        if isinstance(chat_id, str):
+            if chat_id.startswith('@'):
+                chat_id = chat_id[1:]
+            if chat_id.lstrip('-').isdigit():
+                chat_id = int(chat_id)
+        
+        try:
+            chat = await client.get_entity(chat_id)
+        except Exception:
+            dialogs = await client.get_dialogs()
+            for dialog in dialogs:
+                if str(dialog.id) == str(chat_id) or (hasattr(dialog.entity, 'username') and dialog.entity.username == chat_id):
+                    chat = dialog.entity
+                    break
+            else:
+                raise HTTPException(400, detail=f"Не удалось найти чат: {req.chat_id}")
+        
+        messages = await client.get_messages(chat, limit=limit)
+        
+        if not messages or len(messages) == 0:
+            return {
+                "status": "success",
+                "account": req.account,
+                "chat_id": req.chat_id,
+                "chat_title": get_chat_title(chat),
+                "has_messages": False,
+                "total_messages": 0,
+                "messages": []
+            }
+        
+        messages_list = []
+        for message in messages:
+            if message is None:
+                continue
+            
+            message_type = "text"
+            if message.media:
+                if hasattr(message.media, 'document'):
+                    message_type = "document"
+                elif hasattr(message.media, 'photo'):
+                    message_type = "photo"
+                elif hasattr(message.media, 'video'):
+                    message_type = "video"
+                elif hasattr(message.media, 'audio'):
+                    message_type = "audio"
+                elif hasattr(message.media, 'contact'):
+                    message_type = "contact"
+                elif hasattr(message.media, 'geo'):
+                    message_type = "location"
+                else:
+                    message_type = "media"
+            
+            msg_data = {
+                "id": message.id,
+                "date": message.date.isoformat() if message.date else None,
+                "text": (message.text or message.message or "")[:500],
+                "is_outgoing": message.out if hasattr(message, 'out') else False,
+                "message_type": message_type,
+                "has_media": bool(message.media)
+            }
+            
+            sender_info = await get_sender_info_from_message(client, message)
+            if sender_info:
+                msg_data["sender"] = sender_info
+            
+            if req.include_media_info and message.media:
+                if hasattr(message.media, 'contact'):
+                    msg_data["contact_info"] = {
+                        "first_name": message.media.first_name,
+                        "last_name": message.media.last_name,
+                        "phone_number": message.media.phone_number
+                    }
+                elif hasattr(message.media, 'document'):
+                    msg_data["document_info"] = {
+                        "size": getattr(message.media.document, 'size', 0),
+                        "mime_type": getattr(message.media.document, 'mime_type', '')
+                    }
+            
+            messages_list.append(msg_data)
+        
+        return {
+            "status": "success",
+            "account": req.account,
+            "chat_id": req.chat_id,
+            "chat_title": get_chat_title(chat),
+            "has_messages": True,
+            "total_messages": len(messages_list),
+            "requested_limit": limit,
+            "messages": messages_list,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Ошибка получения последних сообщений: {error_msg}")
+        raise HTTPException(500, detail=f"Ошибка получения сообщений: {error_msg}")
 
 
 # ==================== Дополнительные эндпоинты ====================
