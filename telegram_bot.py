@@ -1039,181 +1039,131 @@ async def get_last_messages(req: GetLastMessagesReq):
         raise HTTPException(500, detail=f"Ошибка получения сообщений: {error_msg}")
 
 
-# ==================== НАЖАТИЕ НА КНОПКУ (ИСПРАВЛЕННЫЙ) ====================
+# ==================== НАЖАТИЕ НА КНОПКУ (РАБОЧАЯ ВЕРСИЯ) ====================
 @app.post("/click_button")
 async def click_button(req: ClickButtonReq):
     """
-    Нажать на кнопку в сообщении.
-    
-    Параметры:
-    - account: имя аккаунта
-    - chat_id: ID чата
-    - message_id: ID сообщения с кнопками
-    - button_text: текст кнопки (например "Россия")
-    - button_data: данные кнопки (например "PERSON/RU/307591333")
-    - button_row/button_col: индекс кнопки (0-based)
+    Нажать на callback-кнопку инлайн-бота.
     """
     client = ACTIVE_CLIENTS.get(req.account)
     if not client:
         raise HTTPException(400, detail=f"Аккаунт не найден: {req.account}")
     
     try:
-        # 1. Получаем сущность чата и сообщение
+        # Получаем чат и сообщение
         chat = await client.get_entity(req.chat_id)
         message = await client.get_messages(chat, ids=req.message_id)
         
         if not message:
-            raise HTTPException(404, detail=f"Сообщение с ID {req.message_id} не найдено")
+            raise HTTPException(404, detail="Сообщение не найдено")
         
-        if not hasattr(message, 'buttons') or not message.buttons:
-            raise HTTPException(400, detail="В этом сообщении нет кнопок")
+        if not message.buttons:
+            raise HTTPException(400, detail="В сообщении нет кнопок")
         
-        # 2. Находим нужную кнопку
+        # Ищем кнопку
         target_button = None
-        button_position = None
+        callback_data = None
         
-        # Поиск по тексту
-        if req.button_text:
-            for row_idx, row in enumerate(message.buttons):
-                for col_idx, button in enumerate(row):
-                    if button.text == req.button_text:
-                        target_button = button
-                        button_position = (row_idx, col_idx)
-                        break
-                if target_button:
+        for row in message.buttons:
+            for button in row:
+                # Проверяем по тексту
+                if req.button_text and button.text == req.button_text:
+                    target_button = button
                     break
-        
-        # Поиск по данным кнопки
-        if not target_button and req.button_data:
-            for row_idx, row in enumerate(message.buttons):
-                for col_idx, button in enumerate(row):
-                    button_data_str = ""
-                    if hasattr(button, 'data') and button.data:
-                        try:
-                            button_data_str = button.data.decode('utf-8', errors='ignore')
-                        except:
-                            button_data_str = str(button.data)
-                    elif hasattr(button, 'callback_data') and button.callback_data:
-                        try:
-                            button_data_str = button.callback_data.decode('utf-8', errors='ignore')
-                        except:
-                            button_data_str = str(button.callback_data)
+                # Проверяем по данным
+                if req.button_data:
+                    btn_data = None
+                    if hasattr(button, 'data'):
+                        btn_data = button.data
+                    elif hasattr(button, 'callback_data'):
+                        btn_data = button.callback_data
                     
-                    if button_data_str == req.button_data:
-                        target_button = button
-                        button_position = (row_idx, col_idx)
-                        break
-                if target_button:
-                    break
-        
-        # Поиск по координатам
-        if not target_button and req.button_row is not None and req.button_col is not None:
-            if 0 <= req.button_row < len(message.buttons):
-                if 0 <= req.button_col < len(message.buttons[req.button_row]):
-                    target_button = message.buttons[req.button_row][req.button_col]
-                    button_position = (req.button_row, req.button_col)
+                    if btn_data:
+                        try:
+                            btn_data_str = btn_data.decode('utf-8')
+                        except:
+                            btn_data_str = str(btn_data)
+                        
+                        if btn_data_str == req.button_data:
+                            target_button = button
+                            break
+            if target_button:
+                break
         
         if not target_button:
-            available_buttons = []
+            # Возвращаем список доступных кнопок
+            available = []
             for row in message.buttons:
                 for btn in row:
-                    btn_info = {"text": btn.text}
-                    if hasattr(btn, 'data') and btn.data:
+                    btn_data = None
+                    if hasattr(btn, 'data'):
+                        btn_data = btn.data
+                    elif hasattr(btn, 'callback_data'):
+                        btn_data = btn.callback_data
+                    
+                    if btn_data:
                         try:
-                            btn_info["data"] = btn.data.decode('utf-8', errors='ignore')
+                            btn_data = btn_data.decode('utf-8')
                         except:
-                            btn_info["data"] = str(btn.data)
-                    available_buttons.append(btn_info)
-            
-            raise HTTPException(400, detail={
-                "error": "Кнопка не найдена",
-                "available_buttons": available_buttons,
-                "hint": "Используйте button_text или button_data из списка выше"
-            })
-        
-        # 3. Нажимаем на кнопку
-        try:
-            # Получаем данные кнопки
-            callback_data = None
-            if hasattr(target_button, 'data') and target_button.data:
-                callback_data = target_button.data
-            elif hasattr(target_button, 'callback_data') and target_button.callback_data:
-                callback_data = target_button.callback_data
-            
-            if callback_data:
-                # Используем правильный метод для callback-кнопок
-                from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
-                
-                result = await client(GetBotCallbackAnswerRequest(
-                    peer=chat,
-                    msg_id=message.id,
-                    data=callback_data
-                ))
-                
-            elif hasattr(target_button, 'url') and target_button.url:
-                return {
-                    "status": "url_button",
-                    "message": "Это URL-кнопка, перейдите по ссылке",
-                    "url": target_button.url
-                }
-            else:
-                raise HTTPException(400, detail="Этот тип кнопки не поддерживается")
-            
-            # 4. Получаем ответ бота
-            import asyncio
-            await asyncio.sleep(1)
-            
-            # Получаем новые сообщения
-            new_messages = await client.get_messages(chat, limit=5)
-            response_messages = []
-            
-            for msg in new_messages:
-                if msg.id > message.id:
-                    response_messages.append({
-                        "id": msg.id,
-                        "date": msg.date.isoformat() if msg.date else None,
-                        "text": msg.text or msg.message or "",
-                        "has_buttons": bool(hasattr(msg, 'buttons') and msg.buttons),
-                        "buttons": extract_buttons_from_message(msg) if hasattr(msg, 'buttons') and msg.buttons else None
+                            btn_data = str(btn_data)
+                    
+                    available.append({
+                        "text": btn.text,
+                        "data": btn_data
                     })
             
-            # Декодируем callback_data для ответа
-            callback_data_str = None
-            if callback_data:
-                try:
-                    callback_data_str = callback_data.decode('utf-8', errors='ignore')
-                except:
-                    callback_data_str = str(callback_data)
-            
-            return {
-                "status": "clicked",
-                "account": req.account,
-                "chat_id": req.chat_id,
-                "original_message_id": req.message_id,
-                "clicked_button": {
-                    "text": target_button.text,
-                    "position": button_position,
-                    "data": callback_data_str
-                },
-                "callback_result": {
-                    "message": result.message if hasattr(result, 'message') and result.message else None,
-                    "alert": result.alert if hasattr(result, 'alert') else False,
-                    "url": result.url if hasattr(result, 'url') and result.url else None
-                },
-                "bot_responses": response_messages,
-                "timestamp": datetime.now().isoformat()
-            }
-            
-        except Exception as e:
-            error_msg = str(e)
-            print(f"❌ Ошибка при нажатии на кнопку: {error_msg}")
-            raise HTTPException(500, detail=f"Ошибка при нажатии на кнопку: {error_msg}")
-            
-    except HTTPException:
-        raise
+            raise HTTPException(400, detail={
+                "message": "Кнопка не найдена",
+                "available_buttons": available
+            })
+        
+        # Получаем callback data
+        if hasattr(target_button, 'data'):
+            callback_data = target_button.data
+        elif hasattr(target_button, 'callback_data'):
+            callback_data = target_button.callback_data
+        else:
+            raise HTTPException(400, detail="Не удалось получить данные кнопки")
+        
+        # Отправляем callback запрос
+        from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
+        
+        result = await client(GetBotCallbackAnswerRequest(
+            peer=chat,
+            msg_id=message.id,
+            data=callback_data
+        ))
+        
+        # Ждем ответ бота
+        import asyncio
+        await asyncio.sleep(2)
+        
+        # Получаем новые сообщения
+        new_messages = await client.get_messages(chat, limit=3)
+        bot_responses = []
+        
+        for msg in new_messages:
+            if msg.id > message.id:
+                bot_responses.append({
+                    "id": msg.id,
+                    "text": msg.text or msg.message or "",
+                    "has_buttons": bool(msg.buttons) if hasattr(msg, 'buttons') else False,
+                    "buttons": extract_buttons_from_message(msg) if hasattr(msg, 'buttons') and msg.buttons else None
+                })
+        
+        return {
+            "status": "success",
+            "message": "Кнопка успешно нажата",
+            "callback_result": {
+                "message": result.message if hasattr(result, 'message') else None,
+                "alert": result.alert if hasattr(result, 'alert') else False
+            },
+            "bot_responses": bot_responses
+        }
+        
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ Неожиданная ошибка: {error_msg}")
+        print(f"Ошибка: {error_msg}")
         raise HTTPException(500, detail=f"Ошибка: {error_msg}")
 
 
