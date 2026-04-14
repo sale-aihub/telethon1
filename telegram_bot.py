@@ -1039,7 +1039,7 @@ async def get_last_messages(req: GetLastMessagesReq):
         raise HTTPException(500, detail=f"Ошибка получения сообщений: {error_msg}")
 
 
-# ==================== НАЖАТИЕ НА КНОПКУ ====================
+# ==================== НАЖАТИЕ НА КНОПКУ (ИСПРАВЛЕННЫЙ) ====================
 @app.post("/click_button")
 async def click_button(req: ClickButtonReq):
     """
@@ -1052,15 +1052,13 @@ async def click_button(req: ClickButtonReq):
     - button_text: текст кнопки (например "Россия")
     - button_data: данные кнопки (например "PERSON/RU/307591333")
     - button_row/button_col: индекс кнопки (0-based)
-    
-    Укажите либо button_text/button_data, либо row/col
     """
     client = ACTIVE_CLIENTS.get(req.account)
     if not client:
         raise HTTPException(400, detail=f"Аккаунт не найден: {req.account}")
     
     try:
-        # 1. Получаем сообщение
+        # 1. Получаем сущность чата и сообщение
         chat = await client.get_entity(req.chat_id)
         message = await client.get_messages(chat, ids=req.message_id)
         
@@ -1074,36 +1072,42 @@ async def click_button(req: ClickButtonReq):
         target_button = None
         button_position = None
         
-        # Поиск по тексту или данным
-        if req.button_text or req.button_data:
+        # Поиск по тексту
+        if req.button_text:
             for row_idx, row in enumerate(message.buttons):
                 for col_idx, button in enumerate(row):
-                    if req.button_text and button.text == req.button_text:
+                    if button.text == req.button_text:
                         target_button = button
                         button_position = (row_idx, col_idx)
                         break
-                    elif req.button_data:
-                        button_data_str = ""
-                        if hasattr(button, 'data') and button.data:
-                            try:
-                                button_data_str = button.data.decode('utf-8', errors='ignore')
-                            except:
-                                button_data_str = str(button.data)
-                        elif hasattr(button, 'callback_data') and button.callback_data:
-                            try:
-                                button_data_str = button.callback_data.decode('utf-8', errors='ignore')
-                            except:
-                                button_data_str = str(button.callback_data)
-                        
-                        if button_data_str == req.button_data:
-                            target_button = button
-                            button_position = (row_idx, col_idx)
-                            break
+                if target_button:
+                    break
+        
+        # Поиск по данным кнопки
+        if not target_button and req.button_data:
+            for row_idx, row in enumerate(message.buttons):
+                for col_idx, button in enumerate(row):
+                    button_data_str = ""
+                    if hasattr(button, 'data') and button.data:
+                        try:
+                            button_data_str = button.data.decode('utf-8', errors='ignore')
+                        except:
+                            button_data_str = str(button.data)
+                    elif hasattr(button, 'callback_data') and button.callback_data:
+                        try:
+                            button_data_str = button.callback_data.decode('utf-8', errors='ignore')
+                        except:
+                            button_data_str = str(button.callback_data)
+                    
+                    if button_data_str == req.button_data:
+                        target_button = button
+                        button_position = (row_idx, col_idx)
+                        break
                 if target_button:
                     break
         
         # Поиск по координатам
-        elif req.button_row is not None and req.button_col is not None:
+        if not target_button and req.button_row is not None and req.button_col is not None:
             if 0 <= req.button_row < len(message.buttons):
                 if 0 <= req.button_col < len(message.buttons[req.button_row]):
                     target_button = message.buttons[req.button_row][req.button_col]
@@ -1129,40 +1133,57 @@ async def click_button(req: ClickButtonReq):
         
         # 3. Нажимаем на кнопку
         try:
-            # Для callback кнопок
+            # Получаем данные кнопки
+            callback_data = None
             if hasattr(target_button, 'data') and target_button.data:
-                await client(functions.messages.SendVoteRequest(
-                    peer=chat,
-                    msg_id=message.id,
-                    options=[target_button.data]
-                ))
+                callback_data = target_button.data
             elif hasattr(target_button, 'callback_data') and target_button.callback_data:
-                await client(functions.messages.SendVoteRequest(
+                callback_data = target_button.callback_data
+            
+            if callback_data:
+                # Используем правильный метод для callback-кнопок
+                from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
+                
+                result = await client(GetBotCallbackAnswerRequest(
                     peer=chat,
                     msg_id=message.id,
-                    options=[target_button.callback_data]
+                    data=callback_data
                 ))
+                
+            elif hasattr(target_button, 'url') and target_button.url:
+                return {
+                    "status": "url_button",
+                    "message": "Это URL-кнопка, перейдите по ссылке",
+                    "url": target_button.url
+                }
             else:
-                # Для URL кнопок - просто возвращаем URL
-                if hasattr(target_button, 'url') and target_button.url:
-                    return {
-                        "status": "url_button",
-                        "message": "Это URL-кнопка, перейдите по ссылке",
-                        "url": target_button.url
-                    }
-                else:
-                    raise HTTPException(400, detail="Этот тип кнопки не поддерживается для нажатия через API")
+                raise HTTPException(400, detail="Этот тип кнопки не поддерживается")
             
-            # 4. Ждем ответа после нажатия (опционально)
-            # Получаем новое последнее сообщение (ответ бота)
-            await asyncio.sleep(1)  # Небольшая задержка
-            new_messages = await client.get_messages(chat, limit=2)
-            response_message = None
+            # 4. Получаем ответ бота
+            import asyncio
+            await asyncio.sleep(1)
+            
+            # Получаем новые сообщения
+            new_messages = await client.get_messages(chat, limit=5)
+            response_messages = []
             
             for msg in new_messages:
-                if msg.id > message.id:  # Новое сообщение
-                    response_message = msg
-                    break
+                if msg.id > message.id:
+                    response_messages.append({
+                        "id": msg.id,
+                        "date": msg.date.isoformat() if msg.date else None,
+                        "text": msg.text or msg.message or "",
+                        "has_buttons": bool(hasattr(msg, 'buttons') and msg.buttons),
+                        "buttons": extract_buttons_from_message(msg) if hasattr(msg, 'buttons') and msg.buttons else None
+                    })
+            
+            # Декодируем callback_data для ответа
+            callback_data_str = None
+            if callback_data:
+                try:
+                    callback_data_str = callback_data.decode('utf-8', errors='ignore')
+                except:
+                    callback_data_str = str(callback_data)
             
             return {
                 "status": "clicked",
@@ -1172,27 +1193,21 @@ async def click_button(req: ClickButtonReq):
                 "clicked_button": {
                     "text": target_button.text,
                     "position": button_position,
-                    "data": req.button_data if req.button_data else None
+                    "data": callback_data_str
                 },
-                "bot_response": {
-                    "id": response_message.id if response_message else None,
-                    "text": (response_message.text or response_message.message) if response_message else None,
-                    "has_buttons": bool(hasattr(response_message, 'buttons') and response_message.buttons) if response_message else False,
-                    "buttons": extract_buttons_from_message(response_message) if response_message and hasattr(response_message, 'buttons') and response_message.buttons else None
-                } if response_message else None,
+                "callback_result": {
+                    "message": result.message if hasattr(result, 'message') and result.message else None,
+                    "alert": result.alert if hasattr(result, 'alert') else False,
+                    "url": result.url if hasattr(result, 'url') and result.url else None
+                },
+                "bot_responses": response_messages,
                 "timestamp": datetime.now().isoformat()
             }
             
         except Exception as e:
             error_msg = str(e)
             print(f"❌ Ошибка при нажатии на кнопку: {error_msg}")
-            
-            if "BUTTON_DATA_INVALID" in error_msg:
-                raise HTTPException(400, detail="Данные кнопки недействительны")
-            elif "MESSAGE_ID_INVALID" in error_msg:
-                raise HTTPException(400, detail="ID сообщения недействителен")
-            else:
-                raise HTTPException(500, detail=f"Ошибка при нажатии на кнопку: {error_msg}")
+            raise HTTPException(500, detail=f"Ошибка при нажатии на кнопку: {error_msg}")
             
     except HTTPException:
         raise
