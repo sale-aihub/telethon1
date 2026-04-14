@@ -1424,6 +1424,40 @@ async def check_channel_member(req: CheckChannelMemberReq):
     except Exception as e:
         raise HTTPException(500, detail=f"Ошибка: {str(e)}")
 
+# ==================== ПРОСТОЙ ЭНДПОИНТ ДЛЯ НАЖАТИЯ ====================
+@app.post("/click_button_simple")
+async def click_button_simple(req: ClickButtonReq):
+    """
+    Простой способ нажать на кнопку.
+    """
+    client = ACTIVE_CLIENTS.get(req.account)
+    if not client:
+        raise HTTPException(400, detail=f"Аккаунт не найден: {req.account}")
+    
+    try:
+        chat = await client.get_entity(req.chat_id)
+        message = await client.get_messages(chat, ids=req.message_id)
+        
+        # Данные кнопки Россия
+        callback_data = b"PERSON/RU/307591333"
+        
+        # Отправляем callback
+        from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
+        
+        result = await client(GetBotCallbackAnswerRequest(
+            peer=chat,
+            msg_id=message.id,
+            data=callback_data
+        ))
+        
+        return {
+            "status": "clicked",
+            "result": str(result)
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, detail=str(e))
+
 
 # ==================== Запуск ====================
 if __name__ == "__main__":
