@@ -148,7 +148,17 @@ class GetLastMessagesReq(BaseModel):
     chat_id: Union[str, int]
     limit: int = 10
     include_media_info: bool = False
-    include_buttons: bool = True  # Новый параметр: включать кнопки
+    include_buttons: bool = True
+
+# Новая модель для нажатия на кнопки
+class ClickButtonReq(BaseModel):
+    account: str
+    chat_id: Union[str, int]
+    message_id: int
+    button_text: Optional[str] = None
+    button_data: Optional[str] = None
+    button_row: Optional[int] = None
+    button_col: Optional[int] = None
 
 # ==================== Вспомогательные функции ====================
 def extract_folder_title(folder_obj):
@@ -226,21 +236,17 @@ def extract_buttons_from_message(message) -> Optional[List[Dict[str, Any]]]:
             
             # Определяем тип кнопки
             if hasattr(button, 'url') and button.url:
-                # URL-кнопка (открывает ссылку)
                 button_info["type"] = "url"
                 button_info["url"] = button.url
                 
             elif hasattr(button, 'data') and button.data:
-                # Callback-кнопка (отправляет данные боту)
                 button_info["type"] = "callback"
-                # Пробуем декодировать data как строку
                 try:
                     button_info["data"] = button.data.decode('utf-8', errors='ignore')
                 except:
                     button_info["data"] = str(button.data)
                     
             elif hasattr(button, 'callback_data') and button.callback_data:
-                # Альтернативное поле для callback данных
                 button_info["type"] = "callback"
                 try:
                     button_info["data"] = button.callback_data.decode('utf-8', errors='ignore')
@@ -248,33 +254,26 @@ def extract_buttons_from_message(message) -> Optional[List[Dict[str, Any]]]:
                     button_info["data"] = str(button.callback_data)
                     
             elif hasattr(button, 'switch_inline_query') and button.switch_inline_query:
-                # Switch inline query кнопка
                 button_info["type"] = "switch_inline_query"
                 button_info["query"] = button.switch_inline_query
                 
             elif hasattr(button, 'callback_game') and button.callback_game:
-                # Game кнопка
                 button_info["type"] = "game"
                 
             elif hasattr(button, 'pay') and button.pay:
-                # Pay кнопка
                 button_info["type"] = "pay"
                 
             elif hasattr(button, 'login_url') and button.login_url:
-                # Login URL кнопка
                 button_info["type"] = "login_url"
                 button_info["url"] = button.login_url.url if hasattr(button.login_url, 'url') else str(button.login_url)
                 
             elif hasattr(button, 'web_app') and button.web_app:
-                # Web App кнопка
                 button_info["type"] = "web_app"
                 button_info["web_app_name"] = button.web_app.short_name if hasattr(button.web_app, 'short_name') else "WebApp"
                 button_info["web_app_url"] = button.web_app.url if hasattr(button.web_app, 'url') else None
                 
             else:
-                # Неизвестный тип кнопки
                 button_info["type"] = "unknown"
-                # Пытаемся получить все доступные атрибуты
                 button_info["raw"] = str(button)
             
             row_buttons.append(button_info)
@@ -392,7 +391,7 @@ async def root():
             "/send", "/dialogs", "/chat_history", "/export_members",
             "/send_to_new_user", "/add_contact", "/send_contact",
             "/get_sender_info", "/channel/add_user", "/channel/check_member",
-            "/get_last_message", "/get_last_messages"
+            "/get_last_message", "/get_last_messages", "/click_button"
         ]
     }
 
@@ -795,26 +794,17 @@ async def get_chat_history(req: GetChatHistoryReq):
         raise HTTPException(500, detail=f"Ошибка получения истории: {str(e)}")
 
 
-# ==================== ПОЛУЧЕНИЕ ПОСЛЕДНЕГО СООБЩЕНИЯ (С ПОДДЕРЖКОЙ КНОПОК) ====================
+# ==================== ПОЛУЧЕНИЕ ПОСЛЕДНЕГО СООБЩЕНИЯ ====================
 @app.post("/get_last_message")
 async def get_last_message(req: GetLastMessageReq):
     """
     Получить последнее сообщение в указанном чате, включая кнопки.
-    
-    Параметры:
-    - account: имя аккаунта
-    - chat_id: ID чата, username или @username
-    
-    Возвращает:
-    - Информацию о последнем сообщении: текст, отправитель, дата, ID
-    - Кнопки (если есть): текст, URL, данные callback
     """
     client = ACTIVE_CLIENTS.get(req.account)
     if not client:
         raise HTTPException(400, detail=f"Аккаунт не найден: {req.account}")
 
     try:
-        # 1. Получаем сущность чата
         chat_id = req.chat_id
         
         if isinstance(chat_id, str):
@@ -834,7 +824,6 @@ async def get_last_message(req: GetLastMessageReq):
             else:
                 raise HTTPException(400, detail=f"Не удалось найти чат: {req.chat_id}")
         
-        # 2. Получаем последнее сообщение
         messages = await client.get_messages(chat, limit=1)
         
         if not messages or len(messages) == 0:
@@ -849,11 +838,8 @@ async def get_last_message(req: GetLastMessageReq):
             }
         
         message = messages[0]
-        
-        # 3. Получаем информацию об отправителе
         sender_info = await get_sender_info_from_message(client, message)
         
-        # 4. Определяем тип сообщения
         message_type = "text"
         media_info = None
         
@@ -890,10 +876,8 @@ async def get_last_message(req: GetLastMessageReq):
             else:
                 message_type = "media"
         
-        # 5. Извлекаем кнопки
         buttons = extract_buttons_from_message(message)
         
-        # 6. Формируем ответ
         response = {
             "status": "success",
             "account": req.account,
@@ -914,7 +898,7 @@ async def get_last_message(req: GetLastMessageReq):
                 "forwards": message.forwards if hasattr(message, 'forwards') else None,
                 "sender": sender_info,
                 "media_info": media_info,
-                "buttons": buttons  # <-- Кнопки здесь!
+                "buttons": buttons
             },
             "timestamp": datetime.now().isoformat()
         }
@@ -935,18 +919,11 @@ async def get_last_message(req: GetLastMessageReq):
             raise HTTPException(500, detail=f"Ошибка получения последнего сообщения: {error_msg}")
 
 
-# ==================== ПОЛУЧЕНИЕ ПОСЛЕДНИХ N СООБЩЕНИЙ (С ПОДДЕРЖКОЙ КНОПОК) ====================
+# ==================== ПОЛУЧЕНИЕ ПОСЛЕДНИХ N СООБЩЕНИЙ ====================
 @app.post("/get_last_messages")
 async def get_last_messages(req: GetLastMessagesReq):
     """
     Получить последние N сообщений в чате, включая кнопки.
-    
-    Параметры:
-    - account: имя аккаунта
-    - chat_id: ID чата, username или @username
-    - limit: количество сообщений (1-100, по умолчанию 10)
-    - include_media_info: включать ли детальную информацию о медиа (по умолчанию False)
-    - include_buttons: включать ли кнопки (по умолчанию True)
     """
     client = ACTIVE_CLIENTS.get(req.account)
     if not client:
@@ -1019,19 +996,16 @@ async def get_last_messages(req: GetLastMessagesReq):
                 "has_buttons": False
             }
             
-            # Добавляем кнопки если нужно
             if req.include_buttons:
                 buttons = extract_buttons_from_message(message)
                 if buttons:
                     msg_data["has_buttons"] = True
                     msg_data["buttons"] = buttons
             
-            # Добавляем информацию об отправителе
             sender_info = await get_sender_info_from_message(client, message)
             if sender_info:
                 msg_data["sender"] = sender_info
             
-            # Добавляем медиа информацию если нужно
             if req.include_media_info and message.media:
                 if hasattr(message.media, 'contact'):
                     msg_data["contact_info"] = {
@@ -1063,6 +1037,169 @@ async def get_last_messages(req: GetLastMessagesReq):
         error_msg = str(e)
         print(f"❌ Ошибка получения последних сообщений: {error_msg}")
         raise HTTPException(500, detail=f"Ошибка получения сообщений: {error_msg}")
+
+
+# ==================== НАЖАТИЕ НА КНОПКУ ====================
+@app.post("/click_button")
+async def click_button(req: ClickButtonReq):
+    """
+    Нажать на кнопку в сообщении.
+    
+    Параметры:
+    - account: имя аккаунта
+    - chat_id: ID чата
+    - message_id: ID сообщения с кнопками
+    - button_text: текст кнопки (например "Россия")
+    - button_data: данные кнопки (например "PERSON/RU/307591333")
+    - button_row/button_col: индекс кнопки (0-based)
+    
+    Укажите либо button_text/button_data, либо row/col
+    """
+    client = ACTIVE_CLIENTS.get(req.account)
+    if not client:
+        raise HTTPException(400, detail=f"Аккаунт не найден: {req.account}")
+    
+    try:
+        # 1. Получаем сообщение
+        chat = await client.get_entity(req.chat_id)
+        message = await client.get_messages(chat, ids=req.message_id)
+        
+        if not message:
+            raise HTTPException(404, detail=f"Сообщение с ID {req.message_id} не найдено")
+        
+        if not hasattr(message, 'buttons') or not message.buttons:
+            raise HTTPException(400, detail="В этом сообщении нет кнопок")
+        
+        # 2. Находим нужную кнопку
+        target_button = None
+        button_position = None
+        
+        # Поиск по тексту или данным
+        if req.button_text or req.button_data:
+            for row_idx, row in enumerate(message.buttons):
+                for col_idx, button in enumerate(row):
+                    if req.button_text and button.text == req.button_text:
+                        target_button = button
+                        button_position = (row_idx, col_idx)
+                        break
+                    elif req.button_data:
+                        button_data_str = ""
+                        if hasattr(button, 'data') and button.data:
+                            try:
+                                button_data_str = button.data.decode('utf-8', errors='ignore')
+                            except:
+                                button_data_str = str(button.data)
+                        elif hasattr(button, 'callback_data') and button.callback_data:
+                            try:
+                                button_data_str = button.callback_data.decode('utf-8', errors='ignore')
+                            except:
+                                button_data_str = str(button.callback_data)
+                        
+                        if button_data_str == req.button_data:
+                            target_button = button
+                            button_position = (row_idx, col_idx)
+                            break
+                if target_button:
+                    break
+        
+        # Поиск по координатам
+        elif req.button_row is not None and req.button_col is not None:
+            if 0 <= req.button_row < len(message.buttons):
+                if 0 <= req.button_col < len(message.buttons[req.button_row]):
+                    target_button = message.buttons[req.button_row][req.button_col]
+                    button_position = (req.button_row, req.button_col)
+        
+        if not target_button:
+            available_buttons = []
+            for row in message.buttons:
+                for btn in row:
+                    btn_info = {"text": btn.text}
+                    if hasattr(btn, 'data') and btn.data:
+                        try:
+                            btn_info["data"] = btn.data.decode('utf-8', errors='ignore')
+                        except:
+                            btn_info["data"] = str(btn.data)
+                    available_buttons.append(btn_info)
+            
+            raise HTTPException(400, detail={
+                "error": "Кнопка не найдена",
+                "available_buttons": available_buttons,
+                "hint": "Используйте button_text или button_data из списка выше"
+            })
+        
+        # 3. Нажимаем на кнопку
+        try:
+            # Для callback кнопок
+            if hasattr(target_button, 'data') and target_button.data:
+                await client(functions.messages.SendVoteRequest(
+                    peer=chat,
+                    msg_id=message.id,
+                    options=[target_button.data]
+                ))
+            elif hasattr(target_button, 'callback_data') and target_button.callback_data:
+                await client(functions.messages.SendVoteRequest(
+                    peer=chat,
+                    msg_id=message.id,
+                    options=[target_button.callback_data]
+                ))
+            else:
+                # Для URL кнопок - просто возвращаем URL
+                if hasattr(target_button, 'url') and target_button.url:
+                    return {
+                        "status": "url_button",
+                        "message": "Это URL-кнопка, перейдите по ссылке",
+                        "url": target_button.url
+                    }
+                else:
+                    raise HTTPException(400, detail="Этот тип кнопки не поддерживается для нажатия через API")
+            
+            # 4. Ждем ответа после нажатия (опционально)
+            # Получаем новое последнее сообщение (ответ бота)
+            await asyncio.sleep(1)  # Небольшая задержка
+            new_messages = await client.get_messages(chat, limit=2)
+            response_message = None
+            
+            for msg in new_messages:
+                if msg.id > message.id:  # Новое сообщение
+                    response_message = msg
+                    break
+            
+            return {
+                "status": "clicked",
+                "account": req.account,
+                "chat_id": req.chat_id,
+                "original_message_id": req.message_id,
+                "clicked_button": {
+                    "text": target_button.text,
+                    "position": button_position,
+                    "data": req.button_data if req.button_data else None
+                },
+                "bot_response": {
+                    "id": response_message.id if response_message else None,
+                    "text": (response_message.text or response_message.message) if response_message else None,
+                    "has_buttons": bool(hasattr(response_message, 'buttons') and response_message.buttons) if response_message else False,
+                    "buttons": extract_buttons_from_message(response_message) if response_message and hasattr(response_message, 'buttons') and response_message.buttons else None
+                } if response_message else None,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Ошибка при нажатии на кнопку: {error_msg}")
+            
+            if "BUTTON_DATA_INVALID" in error_msg:
+                raise HTTPException(400, detail="Данные кнопки недействительны")
+            elif "MESSAGE_ID_INVALID" in error_msg:
+                raise HTTPException(400, detail="ID сообщения недействителен")
+            else:
+                raise HTTPException(500, detail=f"Ошибка при нажатии на кнопку: {error_msg}")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Неожиданная ошибка: {error_msg}")
+        raise HTTPException(500, detail=f"Ошибка: {error_msg}")
 
 
 # ==================== Дополнительные эндпоинты ====================
@@ -1234,7 +1371,6 @@ async def get_sender_info(req: GetSenderInfoReq):
         
         sender = await client.get_entity(sender_id)
         
-        # Также добавляем кнопки в ответ
         buttons = extract_buttons_from_message(message)
         
         return {
